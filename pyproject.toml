@@ -1,0 +1,13 @@
+[project]
+name = "eia-ingest"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "psycopg2==2.9.11",
+    "python-dotenv==1.2.1",
+    "qdrant_client==1.17.0",
+    "sentence_transformers==5.2.3",
+    "openai>=1.0.0",
+]

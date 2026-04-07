@@ -1,6 +1,0 @@
-psycopg2==2.9.11
-python-dotenv==1.2.1
-qdrant_client==1.17.0
-sentence_transformers==5.2.3
-from openai import AzureOpenAI
-openai>=1.0.0
