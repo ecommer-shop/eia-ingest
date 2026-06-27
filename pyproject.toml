@@ -1,13 +1,26 @@
 [project]
 name = "eia-ingest"
-version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
+version = "0.3.0"
+description = "Sincronizacion incremental del catalogo Vendure (PostgreSQL, solo lectura) hacia Qdrant"
 requires-python = ">=3.13"
 dependencies = [
-    "psycopg2==2.9.11",
+    "psycopg2-binary==2.9.11",
     "python-dotenv==1.2.1",
     "qdrant_client==1.17.0",
-    "sentence_transformers==5.2.3",
+    "celery>=5.4.0",
+    "redis>=5.0.0",
     "openai>=1.0.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.28.0",
 ]
+
+[project.scripts]
+eia-sync = "eia_ingest.__main__:main"
+dev = "eia_ingest.api:run_dev"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["eia_ingest"]

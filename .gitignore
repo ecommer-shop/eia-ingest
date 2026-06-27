@@ -1,8 +1,27 @@
-data/
-venv/
-.env/
-.env
+# Byte-compiled / optimized / DLL files
 __pycache__/
-data_GENERAL/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDEs and Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Project-specific paths
 .env
+logs/
+data/
+data_GENERAL/
 data_LEGAL/
+*.log
