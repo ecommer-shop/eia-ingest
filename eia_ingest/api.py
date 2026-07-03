@@ -16,7 +16,7 @@ from eia_ingest.config import (
     QDRANT_URL,
 )
 from eia_ingest.scheduler import sync_scheduler
-from eia_ingest.sync import sync_catalog
+from eia_ingest.sync import sync_catalog, sync_documents, sync_ui_guides
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +123,70 @@ def trigger_product_sync(product_id: int, background_tasks: BackgroundTasks):
     return {
         "status": "processing",
         "message": f"Sincronización del producto #{product_id} iniciada."
+    }
+
+
+# ============================================================================
+# Nuevos endpoints: Documents (PDFs) y UI Guides
+# ============================================================================
+
+def run_sync_documents(tenant_id: str = "platform", folder: str = "policies"):
+    """Ejecutor de sincronización de PDFs."""
+    try:
+        logger.info("Iniciando sync documents: tenant=%s, folder=%s", tenant_id, folder)
+        result = sync_documents(tenant_id=tenant_id, folder=folder)
+        logger.info("Sync documents completado: %s", result)
+    except Exception as e:
+        logger.exception("Error ejecutando sync documents: %s", e)
+
+
+def run_sync_ui_guides(tenant_id: str = "platform", folder: str = "guides"):
+    """Ejecutor de sincronización de guías UI."""
+    try:
+        logger.info("Iniciando sync ui-guides: tenant=%s, folder=%s", tenant_id, folder)
+        result = sync_ui_guides(tenant_id=tenant_id, folder=folder)
+        logger.info("Sync ui-guides completado: %s", result)
+    except Exception as e:
+        logger.exception("Error ejecutando sync ui-guides: %s", e)
+
+
+@app.post("/sync/documents", status_code=status.HTTP_202_ACCEPTED)
+def trigger_documents_sync(
+    tenant_id: str = "platform",
+    folder: str = "policies",
+    background_tasks: BackgroundTasks = None,
+):
+    """
+    Sincroniza PDFs desde ./data/{tenant_id}/{folder}/
+
+    Query params:
+        - tenant_id: Nombre de la carpeta del tenant (default: platform)
+        - folder: Subcarpeta dentro del tenant (default: policies, también: docs)
+    """
+    background_tasks.add_task(run_sync_documents, tenant_id, folder)
+    return {
+        "status": "processing",
+        "message": f"Sincronización de documentos ({tenant_id}/{folder}) iniciada."
+    }
+
+
+@app.post("/sync/ui-guides", status_code=status.HTTP_202_ACCEPTED)
+def trigger_ui_guides_sync(
+    tenant_id: str = "platform",
+    folder: str = "guides",
+    background_tasks: BackgroundTasks = None,
+):
+    """
+    Sincroniza guías markdown desde ./data/{tenant_id}/{folder}/
+
+    Query params:
+        - tenant_id: Nombre de la carpeta del tenant (default: platform)
+        - folder: Subcarpeta dentro del tenant (default: guides)
+    """
+    background_tasks.add_task(run_sync_ui_guides, tenant_id, folder)
+    return {
+        "status": "processing",
+        "message": f"Sincronización de guías UI ({tenant_id}/{folder}) iniciada."
     }
 
 

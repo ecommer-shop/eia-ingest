@@ -17,7 +17,7 @@ def _get_env(name: str, default: str = "") -> str:
 # Qdrant Cloud
 QDRANT_URL: str = _get_env("QDRANT_URL", "")
 QDRANT_API_KEY: str = _get_env("QDRANT_API_KEY", "")
-COLLECTION_NAME: str = _get_env("COLLECTION_NAME", "ecommerce-catalog")
+COLLECTION_NAME: str = _get_env("COLLECTION_NAME", "ecommerce")
 
 # Azure OpenAI
 AZURE_OPENAI_ENDPOINT: str = _get_env("AZURE_OPENAI_ENDPOINT", "")
@@ -35,7 +35,10 @@ PG_PASSWORD: str = _get_env("PG_PASSWORD", "")
 PG_SSL: str = _get_env("PG_SSL", "require")
 
 # Tienda (URLs en el texto vectorizable)
-SHOP_BASE_URL: str = _get_env("SHOP_BASE_URL", "https://stg.ecommer.shop")
+SHOP_BASE_URL: str = _get_env("SHOP_BASE_URL")
 
 # Pipeline
 BATCH_SIZE: int = int(_get_env("BATCH_SIZE", "64"))
+
+# Documentos locales (PDFs, guías)
+DATA_FOLDER: str = _get_env("DATA_FOLDER", "./data")

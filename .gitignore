@@ -27,3 +27,6 @@ data/
 data_GENERAL/
 data_LEGAL/
 *.log
+
+QUICK_REFERENCE.md
+REPOSITORY_OVERVIEW_eia_ingest.md

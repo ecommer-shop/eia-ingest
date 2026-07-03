@@ -5,7 +5,6 @@ import json
 import logging
 import re
 import unicodedata
-import uuid
 from typing import List, Optional
 
 import psycopg2
@@ -20,6 +19,7 @@ from eia_ingest.config import (
     PG_USER,
     SHOP_BASE_URL,
 )
+from eia_ingest.point_builder import ChunkInput
 
 logger = logging.getLogger(__name__)
 
@@ -76,17 +76,15 @@ def generate_product_slug(name: str) -> str:
     return slug.strip("-")
 
 
-def make_point_id(product_id: int, language: str) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{product_id}_{language}"))
-
-
-def _format_product_row(row) -> dict:
+def _row_to_chunk_input(row, tenant_id: str = "platform") -> ChunkInput:
+    """Convierte una fila de producto a ChunkInput unificado."""
     product_id, language, name, description, slug, categories, attributes, skus, options = row
 
     # Usar el slug de la base de datos, o generar uno si no existe
     product_slug = slug if slug else generate_product_slug(name)
     product_url = f"{SHOP_BASE_URL}/{language}/product/{product_slug}"
 
+    # Texto para embedding
     text_to_embed = f"[{language.upper()}] Producto: {name}. "
     text_to_embed += f"URL de compra: {product_url}. "
 
@@ -99,26 +97,46 @@ def _format_product_row(row) -> dict:
 
     text_to_embed += f"Descripción: {description}"
 
-    payload = {
+    # Metadata específica del producto
+    metadata = {
         "product_id": product_id,
-        "language": language,
-        "document_type": "product_base",
         "name": name,
         "url": product_url,
-        "categories": categories.split(", ") if categories != "Sin categoría" else [],
-        "attributes": attributes.split(", ") if attributes != "Sin atributos" else [],
-        "skus": skus.split(", ") if skus else [],
-        "options": options.split(", ") if options else [],
+        "categories": [] if not categories or categories == "Sin categoría" else categories.split(", "),
+        "attributes": [] if not attributes or attributes == "Sin atributos" else attributes.split(", "),
+        "skus": [] if not skus else skus.split(", "),
+        "options": [] if not options else options.split(", "),
+        "language": language,
     }
 
-    return {"text": text_to_embed, "payload": payload}
+    return ChunkInput(
+        tenant_id=tenant_id,
+        content_type="CATALOGO",
+        audience="CLIENTE",
+        channels=["web","whatsapp","instagram","messenger"],
+        text=text_to_embed,
+        source_type="vendure_product",
+        source_id=f"product:{product_id}:{language}",
+        metadata=metadata,
+    )
 
 
 def extract_product_catalog(
     product_id: Optional[int] = None,
     verbose: bool = False,
-) -> List[dict]:
-    """Extrae productos activos del catálogo. Solo lectura."""
+    tenant_id: str = "platform",
+) -> List[ChunkInput]:
+    """
+    Extrae productos activos del catálogo y los retorna como ChunkInputs.
+
+    Args:
+        product_id: Filtrar por producto específico (opcional)
+        verbose: Loggear información adicional
+        tenant_id: Identificador del tenant (default: platform)
+
+    Returns:
+        Lista de ChunkInput listos para sincronizar
+    """
     product_filter = ""
     params: tuple = ()
     if product_id is not None:
@@ -134,13 +152,15 @@ def extract_product_catalog(
                 cur.execute(query, params)
                 rows = cur.fetchall()
 
-        extracted = [_format_product_row(row) for row in rows]
+        chunks = [_row_to_chunk_input(row, tenant_id) for row in rows]
 
-        if verbose and extracted:
-            logger.info("Extraidos %d productos/idiomas.", len(extracted))
-            logger.debug("Muestra: %s", json.dumps(extracted[0]["payload"], ensure_ascii=False))
+        if verbose and chunks:
+            logger.info("Extraídos %d productos/idiomas.", len(chunks))
+            first = chunks[0]
+            logger.debug("Muestra: tenant=%s, content_type=%s, source=%s",
+                        first.tenant_id, first.content_type, first.source_id)
 
-        return extracted
+        return chunks
 
     except Exception:
         logger.exception("Error leyendo catálogo desde PostgreSQL")
