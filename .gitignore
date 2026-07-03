@@ -30,3 +30,8 @@ data_LEGAL/
 
 QUICK_REFERENCE.md
 REPOSITORY_OVERVIEW_eia_ingest.md
+
+data/platform/company
+data/platform/policies
+data/platform/docs 
+data/platforms/support

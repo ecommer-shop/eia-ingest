@@ -93,7 +93,7 @@ def read_pdf_chunks(document: dict) -> list[ChunkInput]:
             tenant_id=document["tenant_id"],
             content_type="POLITICAS" if document["folder"] == "policies" else "DOCUMENTOS",
             audience="CLIENTE",
-            channels=["web"],
+            channels=["web","whatsapp","instagram","messenger"],
             text=chunk_text,
             source_type="pdf",
             source_id=f"{document['source_id']}#chunk_{i}",
@@ -101,6 +101,7 @@ def read_pdf_chunks(document: dict) -> list[ChunkInput]:
                 "filename": document["filename"],
                 "chunk_index": i,
                 "total_chunks": len(chunks),
+                "folder": document["folder"],
             },
         )
         chunk_inputs.append(chunk_input)
