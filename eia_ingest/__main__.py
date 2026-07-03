@@ -4,7 +4,7 @@ import json
 import logging
 import sys
 
-from eia_ingest.sync.catalog import sync_catalog
+from eia_ingest.sync import sync_catalog
 
 
 def main(argv: list[str] | None = None) -> int:

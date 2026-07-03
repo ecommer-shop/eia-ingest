@@ -29,6 +29,7 @@ CATALOG_QUERY = """
         pt."languageCode" AS language,
         pt.name AS product_name,
         pt.description AS product_description,
+        pt.slug AS product_slug,
         COALESCE(string_agg(DISTINCT ct.name, ', '), 'Sin categoría') AS categories,
         COALESCE(string_agg(DISTINCT fvt.name, ', '), 'Sin atributos') AS attributes,
         COALESCE(string_agg(DISTINCT pv.sku, ', '), '') AS skus,
@@ -43,8 +44,9 @@ CATALOG_QUERY = """
     LEFT JOIN product_variant_options_product_option pv_opt ON pv.id = pv_opt."productVariantId"
     LEFT JOIN product_option_translation pot ON pv_opt."productOptionId" = pot."baseId" AND pot."languageCode" = pt."languageCode"
     WHERE p."deletedAt" IS NULL
+        AND p.enabled = true
     {product_filter}
-    GROUP BY p.id, pt."languageCode", pt.name, pt.description
+    GROUP BY p.id, pt."languageCode", pt.name, pt.description, pt.slug
 """
 
 
@@ -79,10 +81,11 @@ def make_point_id(product_id: int, language: str) -> str:
 
 
 def _format_product_row(row) -> dict:
-    product_id, language, name, description, categories, attributes, skus, options = row
+    product_id, language, name, description, slug, categories, attributes, skus, options = row
 
-    slug = generate_product_slug(name)
-    product_url = f"{SHOP_BASE_URL}/{language}/product/{slug}"
+    # Usar el slug de la base de datos, o generar uno si no existe
+    product_slug = slug if slug else generate_product_slug(name)
+    product_url = f"{SHOP_BASE_URL}/{language}/product/{product_slug}"
 
     text_to_embed = f"[{language.upper()}] Producto: {name}. "
     text_to_embed += f"URL de compra: {product_url}. "

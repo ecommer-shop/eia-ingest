@@ -1,3 +1,3 @@
-"""Sincronizacion incremental del catalogo Vendure (PostgreSQL) hacia Qdrant."""
+"""Sincronización incremental del catálogo Vendure (PostgreSQL) hacia Qdrant."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

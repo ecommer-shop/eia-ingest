@@ -1,14 +1,12 @@
 [project]
 name = "eia-ingest"
-version = "0.3.0"
-description = "Sincronizacion incremental del catalogo Vendure (PostgreSQL, solo lectura) hacia Qdrant"
+version = "0.5.0"
+description = "Sincronización incremental del catálogo Vendure (PostgreSQL, solo lectura) hacia Qdrant"
 requires-python = ">=3.13"
 dependencies = [
     "psycopg2-binary==2.9.11",
     "python-dotenv==1.2.1",
     "qdrant_client==1.17.0",
-    "celery>=5.4.0",
-    "redis>=5.0.0",
     "openai>=1.0.0",
     "fastapi>=0.110.0",
     "uvicorn>=0.28.0",
