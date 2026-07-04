@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 CATALOG_QUERY = """
     SELECT
         p.id AS product_id,
+        c.id AS channel_id,
+        c.code AS channel_code,
+        c.token AS channel_token,
         pt."languageCode" AS language,
         pt.name AS product_name,
         pt.description AS product_description,
@@ -37,6 +40,8 @@ CATALOG_QUERY = """
         COALESCE(string_agg(DISTINCT pot.name, ', '), '') AS options
     FROM product p
     JOIN product_translation pt ON p.id = pt."baseId" AND pt."languageCode" IN ('es', 'en')
+    JOIN product_channels_channel pcc ON pcc."productId" = p.id
+    JOIN channel c ON c.id = pcc."channelId"
     LEFT JOIN product_facet_values_facet_value pfv ON p.id = pfv."productId"
     LEFT JOIN facet_value_translation fvt ON pfv."facetValueId" = fvt."baseId" AND fvt."languageCode" = pt."languageCode"
     LEFT JOIN product_variant pv ON p.id = pv."productId"
@@ -47,7 +52,7 @@ CATALOG_QUERY = """
     WHERE p."deletedAt" IS NULL
         AND p.enabled = true
     {product_filter}
-    GROUP BY p.id, pt."languageCode", pt.name, pt.description, pt.slug
+    GROUP BY p.id, c.id, c.code, c.token, pt."languageCode", pt.name, pt.description, pt.slug
 """
 
 
@@ -70,6 +75,17 @@ def _readonly_connection() -> psycopg2.extensions.connection:
     return conn
 
 
+DEFAULT_CHANNEL_CODE = "__default_channel__"
+PLATFORM_TENANT_ID = "platform"
+
+
+def resolve_tenant_id(channel_code: str, channel_token: str) -> str:
+    """Resuelve el tenant_id usando el canal real de Vendure cuando corresponde."""
+    if channel_code == DEFAULT_CHANNEL_CODE:
+        return PLATFORM_TENANT_ID
+    return channel_token or PLATFORM_TENANT_ID
+
+
 def generate_product_slug(name: str) -> str:
     normalized = unicodedata.normalize("NFKD", name).encode("ASCII", "ignore").decode("utf-8")
     normalized = normalized.lower()
@@ -79,7 +95,24 @@ def generate_product_slug(name: str) -> str:
 
 def _row_to_chunk_input(row, tenant_id: str = "platform") -> ChunkInput:
     """Convierte una fila de producto a ChunkInput unificado."""
-    product_id, language, name, description, slug, categories, attributes, skus, options = row
+    (
+        product_id,
+        channel_id,
+        channel_code,
+        channel_token,
+        language,
+        name,
+        description,
+        slug,
+        categories,
+        attributes,
+        skus,
+        options,
+    ) = row
+
+    resolved_tenant_id = resolve_tenant_id(channel_code, channel_token)
+    if tenant_id != "platform":
+        resolved_tenant_id = tenant_id
 
     # Usar el slug de la base de datos, o generar uno si no existe
     product_slug = slug if slug else generate_product_slug(name)
@@ -108,16 +141,19 @@ def _row_to_chunk_input(row, tenant_id: str = "platform") -> ChunkInput:
         "skus": [] if not skus else skus.split(", "),
         "options": [] if not options else options.split(", "),
         "language": language,
+        "channel_id": channel_id,
+        "channel_code": channel_code,
+        "channel_token": channel_token,
     }
 
     return ChunkInput(
-        tenant_id=tenant_id,
+        tenant_id=resolved_tenant_id,
         content_type="CATALOGO",
         audience=AUDIENCE_CLIENTE,
         channels=["web","whatsapp","instagram","messenger"],
         text=text_to_embed,
         source_type="vendure_product",
-        source_id=f"product:{product_id}:{language}",
+        source_id=f"product:{product_id}:{channel_token}:{language}",
         metadata=metadata,
     )
 
