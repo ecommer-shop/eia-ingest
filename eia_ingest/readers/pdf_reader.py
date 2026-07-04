@@ -8,9 +8,22 @@ import pypdf
 
 from eia_ingest.chunking import chunk_by_paragraphs
 from eia_ingest.config import DATA_FOLDER
+from eia_ingest.constants import AUDIENCE_CLIENTE
 from eia_ingest.point_builder import ChunkInput
 
 logger = logging.getLogger(__name__)
+
+FOLDER_CONTENT_TYPE = {
+    "policies": "POLITICAS",
+    "payment": "PAGOS",
+    "support": "SOPORTE",
+    "company": "INFO_GENERAL",
+}
+
+
+def get_content_type_for_folder(folder: str) -> str:
+    """Mapea una carpeta de documentos a un content_type estructurado."""
+    return FOLDER_CONTENT_TYPE.get(folder, "DOCUMENTO")
 
 
 def extract_pending_documents(
@@ -91,8 +104,8 @@ def read_pdf_chunks(document: dict) -> list[ChunkInput]:
     for i, chunk_text in enumerate(chunks):
         chunk_input = ChunkInput(
             tenant_id=document["tenant_id"],
-            content_type="POLITICAS" if document["folder"] == "policies" else "DOCUMENTOS",
-            audience="CLIENTE",
+            content_type=get_content_type_for_folder(document["folder"]),
+            audience=AUDIENCE_CLIENTE,
             channels=["web","whatsapp","instagram","messenger"],
             text=chunk_text,
             source_type="pdf",

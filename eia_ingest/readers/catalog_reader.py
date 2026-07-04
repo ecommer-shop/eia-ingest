@@ -19,6 +19,7 @@ from eia_ingest.config import (
     PG_USER,
     SHOP_BASE_URL,
 )
+from eia_ingest.constants import AUDIENCE_CLIENTE
 from eia_ingest.point_builder import ChunkInput
 
 logger = logging.getLogger(__name__)
@@ -112,7 +113,7 @@ def _row_to_chunk_input(row, tenant_id: str = "platform") -> ChunkInput:
     return ChunkInput(
         tenant_id=tenant_id,
         content_type="CATALOGO",
-        audience="CLIENTE",
+        audience=AUDIENCE_CLIENTE,
         channels=["web","whatsapp","instagram","messenger"],
         text=text_to_embed,
         source_type="vendure_product",

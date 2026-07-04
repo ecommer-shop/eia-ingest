@@ -7,6 +7,7 @@ from typing import Literal
 
 from eia_ingest.chunking import chunk_markdown_by_headers
 from eia_ingest.config import DATA_FOLDER
+from eia_ingest.constants import AUDIENCE_COMERCIANTE
 from eia_ingest.point_builder import ChunkInput
 
 logger = logging.getLogger(__name__)
@@ -85,8 +86,8 @@ def read_guide_chunks(guide: dict) -> list[ChunkInput]:
         chunk_input = ChunkInput(
             tenant_id=guide["tenant_id"],
             content_type="GUIA_UI",
-            audience="COMERCIANTE",
-            channels=["web", "admin"],
+            audience=AUDIENCE_COMERCIANTE,
+            channels=["web", "web_admin"],
             text=chunk_text,
             source_type="ui_guide_md",
             source_id=f"{guide['source_id']}#section_{i}",

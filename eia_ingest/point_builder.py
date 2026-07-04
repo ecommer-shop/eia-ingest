@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
 
+from eia_ingest.constants import AUDIENCE_CLIENTE, AUDIENCE_COMERCIANTE
+
 
 @dataclass
 class ChunkInput:

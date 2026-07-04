@@ -31,6 +31,7 @@ from eia_ingest.point_builder import (
     content_hash as compute_content_hash_from_text,
     make_point_id,
 )
+from eia_ingest.constants import AUDIENCE_CLIENTE, AUDIENCE_COMERCIANTE
 from eia_ingest.qdrant_client import get_qdrant_client
 from eia_ingest.readers.catalog_reader import extract_product_catalog
 from eia_ingest.readers.pdf_reader import (
@@ -124,9 +125,9 @@ def _ensure_collection(client: QdrantClient) -> None:
     logger.info("Colección '%s' lista con todos los índices", COLLECTION_NAME)
 
 
-def _scroll_hashes_by_source_type(client: QdrantClient, source_type: str) -> Dict[str, str]:
-    """Obtiene hashes de puntos por tipo de fuente."""
-    hashes: Dict[str, str] = {}
+def _scroll_hashes_by_source_type(client: QdrantClient, source_type: str) -> Dict[str, dict]:
+    """Obtiene estados de hash de puntos por tipo de fuente."""
+    hashes: Dict[str, dict] = {}
     offset = None
     source_filter = Filter(
         must=[FieldCondition(key="source_type", match=MatchValue(value=source_type))]
@@ -142,8 +143,11 @@ def _scroll_hashes_by_source_type(client: QdrantClient, source_type: str) -> Dic
             with_vectors=False,
         )
         for point in points:
-            # Usar payload_hash para detectar cambios en texto O metadata
-            hashes[str(point.id)] = (point.payload or {}).get("payload_hash", "")
+            payload = point.payload or {}
+            hashes[str(point.id)] = {
+                "payload_hash": payload.get("payload_hash", ""),
+                "content_hash": payload.get("content_hash", ""),
+            }
         if offset is None:
             break
 
@@ -196,17 +200,34 @@ def _sync_chunks(
 
     for chunk in chunks:
         point_id = make_point_id(chunk.tenant_id, chunk.source_id)
-        # Usar payload_hash para detectar cambios en texto O metadata
-        chunk_hash = payload_hash(chunk.text, chunk.metadata)
         active_ids.add(point_id)
 
-        stored_hash = existing_hashes.get(point_id)
-        if stored_hash is None:
+        stored_state = existing_hashes.get(point_id)
+        if stored_state is None:
             to_sync.append(chunk)
             pending_stats.append("inserted")
-        elif stored_hash != chunk_hash:
-            to_sync.append(chunk)
-            pending_stats.append("updated")
+            continue
+
+        current_content_hash = content_hash(chunk.text)
+        current_payload_hash = payload_hash(chunk.text, chunk.metadata)
+        stored_content_hash = stored_state.get("content_hash", "")
+        stored_payload_hash = stored_state.get("payload_hash", "")
+
+        if stored_payload_hash != current_payload_hash:
+            if stored_content_hash != current_content_hash:
+                to_sync.append(chunk)
+                pending_stats.append("updated")
+            else:
+                payload_only_update = build_payload(chunk)
+                payload_only_update["content_hash"] = current_content_hash
+                payload_only_update["payload_hash"] = current_payload_hash
+                client.set_payload(
+                    collection_name=COLLECTION_NAME,
+                    points=[point_id],
+                    payload=payload_only_update,
+                )
+                stats["updated"] += 1
+                logger.info("Metadata-only update for point %s (%s)", point_id, source_type)
         else:
             stats["skipped"] += 1
 
@@ -242,7 +263,7 @@ def ensure_collection() -> None:
     _ensure_collection(client)
 
 
-def scroll_product_hashes(client: Optional[QdrantClient] = None) -> Dict[str, str]:
+def scroll_product_hashes(client: Optional[QdrantClient] = None) -> Dict[str, dict]:
     """Mantiene compatibilidad hacia atrás."""
     if client is None:
         client = get_qdrant_client()
@@ -308,17 +329,34 @@ def sync_catalog(product_id: Optional[int] = None) -> dict:
 
     for chunk in products:
         point_id = make_point_id(chunk.tenant_id, chunk.source_id)
-        # Use payload_hash for consistency with stored hashes
-        chunk_hash = payload_hash(chunk.text, chunk.metadata)
         active_point_ids.add(point_id)
 
-        stored_hash = existing_hashes.get(point_id)
-        if stored_hash is None:
+        stored_state = existing_hashes.get(point_id)
+        if stored_state is None:
             to_sync.append(chunk)
             pending_stats.append("inserted")
-        elif stored_hash != chunk_hash:
-            to_sync.append(chunk)
-            pending_stats.append("updated")
+            continue
+
+        current_content_hash = content_hash(chunk.text)
+        current_payload_hash = payload_hash(chunk.text, chunk.metadata)
+        stored_content_hash = stored_state.get("content_hash", "")
+        stored_payload_hash = stored_state.get("payload_hash", "")
+
+        if stored_payload_hash != current_payload_hash:
+            if stored_content_hash != current_content_hash:
+                to_sync.append(chunk)
+                pending_stats.append("updated")
+            else:
+                payload_only_update = build_payload(chunk)
+                payload_only_update["content_hash"] = current_content_hash
+                payload_only_update["payload_hash"] = current_payload_hash
+                client.set_payload(
+                    collection_name=COLLECTION_NAME,
+                    points=[point_id],
+                    payload=payload_only_update,
+                )
+                stats["updated"] += 1
+                logger.info("Metadata-only update for point %s (vendure_product)", point_id)
         else:
             stats["skipped"] += 1
 
