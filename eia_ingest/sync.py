@@ -1,10 +1,17 @@
-"""Orquestador de sincronización: PostgreSQL → Qdrant (catálogo, PDFs, guías)."""
+"""Orquestador de sincronización: fuentes → Qdrant (catálogo, PDFs, guías).
+
+Flujo general:
+    1. Extraer contenido desde la fuente (PostgreSQL, PDF, Markdown)
+    2. Normalizar a ChunkInput (dataclass unificada)
+    3. Detectar cambios via doble hash (content_hash + payload_hash)
+    4. Generar embeddings y upsert a Qdrant
+    5. Limpiar puntos obsoletos (solo catálogo en sync completo)
+"""
 from __future__ import annotations
 
-import hashlib
 import logging
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import PointStruct
@@ -28,10 +35,10 @@ from eia_ingest.embeddings import get_embeddings
 from eia_ingest.point_builder import (
     build_payload,
     ChunkInput,
-    content_hash as compute_content_hash_from_text,
+    content_hash,
     make_point_id,
+    payload_hash,
 )
-from eia_ingest.constants import AUDIENCE_CLIENTE, AUDIENCE_COMERCIANTE
 from eia_ingest.qdrant_client import get_qdrant_client
 from eia_ingest.readers.catalog_reader import extract_product_catalog
 from eia_ingest.readers.pdf_reader import (
@@ -45,7 +52,7 @@ from eia_ingest.readers.ui_guide_reader import (
 
 logger = logging.getLogger(__name__)
 
-# Filtros para cada tipo de contenido
+# Filtros Qdrant para cada tipo de fuente
 PRODUCT_FILTER = Filter(
     must=[FieldCondition(key="source_type", match=MatchValue(value="vendure_product"))]
 )
@@ -58,37 +65,12 @@ GUIDE_FILTER = Filter(
 
 
 # =============================================================================
-# UTILIDADES
+# FUNCIONES INTERNAS
 # =============================================================================
 
-def content_hash(text: str) -> str:
-    """Hash del texto para embedding."""
-    return compute_content_hash_from_text(text)
-
-
-def payload_hash(text: str, metadata: dict) -> str:
-    """
-    Hash del texto + metadata.
-    Se usa para detectar cambios en el contenido O en los metadatos.
-    """
-    import json
-    payload_for_hash = {
-        "text": text,
-        "metadata": metadata,
-    }
-    payload_json = json.dumps(payload_for_hash, sort_keys=True, default=str)
-    return hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
-
-
-# =============================================================================
-# CATÁLOGO (mantiene compatibilidad hacia atrás)
-# =============================================================================
 
 def _ensure_collection(client: QdrantClient) -> None:
-    """
-    Crea la colección si no existe, y asegura que todos los índices estén presentes.
-    Si la colección ya existe, agrega los índices faltantes.
-    """
+    """Crea la colección si no existe y agrega índices faltantes."""
     required_indices = [
         "tenant_id",
         "content_type",
@@ -97,7 +79,6 @@ def _ensure_collection(client: QdrantClient) -> None:
         "source_type",
     ]
 
-    # Verificar si la colección existe
     try:
         client.get_collection(collection_name=COLLECTION_NAME)
         collection_exists = True
@@ -105,28 +86,32 @@ def _ensure_collection(client: QdrantClient) -> None:
         collection_exists = False
 
     if not collection_exists:
-        # Crear colección nueva
         client.create_collection(
             collection_name=COLLECTION_NAME,
             vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
         )
         logger.info("Colección '%s' creada", COLLECTION_NAME)
 
-    # Agregar índices faltantes (si la colección ya existía)
     for field in required_indices:
         try:
-            # Intentar crear el índice - si ya existe lanza excepción
-            client.create_payload_index(COLLECTION_NAME, field, PayloadSchemaType.KEYWORD)
+            client.create_payload_index(
+                COLLECTION_NAME, field, PayloadSchemaType.KEYWORD
+            )
             logger.info("Índice '%s' agregado", field)
         except Exception:
-            # El índice ya existe, continuar
-            pass
+            pass  # Índice ya existe
 
     logger.info("Colección '%s' lista con todos los índices", COLLECTION_NAME)
 
 
-def _scroll_hashes_by_source_type(client: QdrantClient, source_type: str) -> Dict[str, dict]:
-    """Obtiene estados de hash de puntos por tipo de fuente."""
+def _scroll_hashes_by_source_type(
+    client: QdrantClient, source_type: str
+) -> Dict[str, dict]:
+    """Obtiene hashes de puntos existentes por tipo de fuente.
+
+    Retorna dict mapeando point_id → {content_hash, payload_hash}.
+    Se usa para detectar qué puntos cambiaron entre sincronizaciones.
+    """
     hashes: Dict[str, dict] = {}
     offset = None
     source_filter = Filter(
@@ -154,13 +139,15 @@ def _scroll_hashes_by_source_type(client: QdrantClient, source_type: str) -> Dic
     return hashes
 
 
-def _scroll_point_ids_by_source_type(client: QdrantClient, source_type: str) -> Set[str]:
-    """Obtiene IDs de puntos por tipo de fuente."""
+def _scroll_point_ids_by_source_type(
+    client: QdrantClient, source_type: str
+) -> Set[str]:
+    """Obtiene solo los IDs de puntos por tipo de fuente."""
     return set(_scroll_hashes_by_source_type(client, source_type).keys())
 
 
 def _build_points_from_chunks(chunks: List[ChunkInput]) -> List[PointStruct]:
-    """Construye PointStructs desde ChunkInputs."""
+    """Genera embeddings y construye PointStructs listos para upsert."""
     if not chunks:
         return []
 
@@ -183,11 +170,16 @@ def _sync_chunks(
     stats: dict,
     source_type: str,
 ) -> Set[str]:
-    """
-    Sincroniza chunks a Qdrant, detectando cambios por hash.
+    """Sincroniza chunks a Qdrant con detección de cambios por hash.
+
+    Lógica por cada chunk:
+        - Nuevo point_id → INSERT (requiere embedding)
+        - point_id existe + payload_hash cambió + content_hash cambió → UPDATE (requiere embedding)
+        - point_id existe + payload_hash cambió + content_hash igual → META_ONLY (sin embedding)
+        - point_id existe + sin cambios → SKIP
 
     Returns:
-        Set de IDs activos para cleanup posterior
+        Set de point IDs activos (para cleanup posterior de puntos obsoletos)
     """
     if not chunks:
         return set()
@@ -208,29 +200,33 @@ def _sync_chunks(
             pending_stats.append("inserted")
             continue
 
-        current_content_hash = content_hash(chunk.text)
-        current_payload_hash = payload_hash(chunk.text, chunk.metadata)
-        stored_content_hash = stored_state.get("content_hash", "")
-        stored_payload_hash = stored_state.get("payload_hash", "")
+        current_content = content_hash(chunk.text)
+        current_payload = payload_hash(chunk.text, chunk.metadata)
+        stored_content = stored_state.get("content_hash", "")
+        stored_payload = stored_state.get("payload_hash", "")
 
-        if stored_payload_hash != current_payload_hash:
-            if stored_content_hash != current_content_hash:
-                to_sync.append(chunk)
-                pending_stats.append("updated")
-            else:
-                payload_only_update = build_payload(chunk)
-                payload_only_update["content_hash"] = current_content_hash
-                payload_only_update["payload_hash"] = current_payload_hash
-                client.set_payload(
-                    collection_name=COLLECTION_NAME,
-                    points=[point_id],
-                    payload=payload_only_update,
-                )
-                stats["updated"] += 1
-                logger.info("Metadata-only update for point %s (%s)", point_id, source_type)
-        else:
+        if stored_payload == current_payload:
             stats["skipped"] += 1
+            continue
 
+        if stored_content != current_content:
+            # Texto cambió → re-embedding necesario
+            to_sync.append(chunk)
+            pending_stats.append("updated")
+        else:
+            # Solo metadata cambió → actualizar payload sin re-embedding
+            payload_only = build_payload(chunk)
+            payload_only["content_hash"] = current_content
+            payload_only["payload_hash"] = current_payload
+            client.set_payload(
+                collection_name=COLLECTION_NAME,
+                points=[point_id],
+                payload=payload_only,
+            )
+            stats["updated"] += 1
+            logger.info("Metadata-only update: %s (%s)", point_id, source_type)
+
+    # Procesar upserts en batches
     for i in range(0, len(to_sync), BATCH_SIZE):
         batch = to_sync[i : i + BATCH_SIZE]
         try:
@@ -240,7 +236,12 @@ def _sync_chunks(
             for action in pending_stats[i : i + len(batch)]:
                 stats[action] += 1
 
-            logger.info("Batch %d: %d puntos sincronizados (%s)", i // BATCH_SIZE + 1, len(batch), source_type)
+            logger.info(
+                "Batch %d: %d puntos sincronizados (%s)",
+                i // BATCH_SIZE + 1,
+                len(batch),
+                source_type,
+            )
         except Exception:
             logger.exception("Error en batch %d (%s)", i // BATCH_SIZE + 1, source_type)
             stats["failed"] += len(batch)
@@ -249,70 +250,27 @@ def _sync_chunks(
 
 
 # =============================================================================
-# API PÚBLICA - CATÁLOGO (mantiene compatibilidad exacta)
+# API PÚBLICA — CATÁLOGO
 # =============================================================================
-
-def compute_content_hash(text: str) -> str:
-    """Mantiene compatibilidad hacia atrás."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def ensure_collection() -> None:
-    """Mantiene compatibilidad hacia atrás."""
-    client = get_qdrant_client()
-    _ensure_collection(client)
-
-
-def scroll_product_hashes(client: Optional[QdrantClient] = None) -> Dict[str, dict]:
-    """Mantiene compatibilidad hacia atrás."""
-    if client is None:
-        client = get_qdrant_client()
-    return _scroll_hashes_by_source_type(client, "vendure_product")
-
-
-def scroll_product_point_ids(client: Optional[QdrantClient] = None) -> Set[str]:
-    """Mantiene compatibilidad hacia atrás."""
-    if client is None:
-        client = get_qdrant_client()
-    return set(scroll_product_hashes(client).keys())
-
-
-def prepare_product(item: dict) -> Tuple[str, str, dict]:
-    """Mantiene compatibilidad hacia atrás."""
-    content_hash_val = compute_content_hash(item["text"])
-    payload = {
-        **item["payload"],
-        "content_hash": content_hash_val,
-        "embedding_model": EMBEDDING_MODEL,
-        "synced_at": datetime.now(timezone.utc).isoformat(),
-    }
-    point_id = make_point_id(payload.get("product_id", 0), payload.get("language", "es"))
-    return point_id, content_hash_val, payload
-
-
-def build_points(batch: List[dict]) -> List[PointStruct]:
-    """Mantiene compatibilidad hacia atrás."""
-    texts = [entry["text"] for entry in batch]
-    vectors = get_embeddings(texts)
-    return [
-        PointStruct(
-            id=entry["point_id"],
-            payload=entry["payload"],
-            vector=vector,
-        )
-        for entry, vector in zip(batch, vectors)
-    ]
 
 
 def sync_catalog(product_id: Optional[int] = None) -> dict:
-    """
-    Sincroniza el catálogo SQL → Qdrant.
-    Usa ChunkInput unificado para mantener estructura consistente.
+    """Sincroniza el catálogo de productos desde PostgreSQL hacia Qdrant.
+
+    Args:
+        product_id: Si se especifica, sinc solo ese producto.
+                    Si es None, sincronización completa con cleanup de obsoletos.
     """
     started = datetime.now(timezone.utc)
-    stats = {"inserted": 0, "updated": 0, "skipped": 0, "deleted": 0, "failed": 0, "total": 0}
+    stats = {
+        "inserted": 0,
+        "updated": 0,
+        "skipped": 0,
+        "deleted": 0,
+        "failed": 0,
+        "total": 0,
+    }
 
-    # Extraer como ChunkInputs
     products = extract_product_catalog(product_id=product_id, verbose=True)
     if not products:
         logger.warning("No hay productos para sincronizar")
@@ -321,61 +279,14 @@ def sync_catalog(product_id: Optional[int] = None) -> dict:
     stats["total"] = len(products)
     client = get_qdrant_client()
     _ensure_collection(client)
-    existing_hashes = scroll_product_hashes(client)
 
-    to_sync: List[ChunkInput] = []
-    pending_stats: List[str] = []
-    active_point_ids: Set[str] = set()
+    active_ids = _sync_chunks(products, client, stats, "vendure_product")
 
-    for chunk in products:
-        point_id = make_point_id(chunk.tenant_id, chunk.source_id)
-        active_point_ids.add(point_id)
-
-        stored_state = existing_hashes.get(point_id)
-        if stored_state is None:
-            to_sync.append(chunk)
-            pending_stats.append("inserted")
-            continue
-
-        current_content_hash = content_hash(chunk.text)
-        current_payload_hash = payload_hash(chunk.text, chunk.metadata)
-        stored_content_hash = stored_state.get("content_hash", "")
-        stored_payload_hash = stored_state.get("payload_hash", "")
-
-        if stored_payload_hash != current_payload_hash:
-            if stored_content_hash != current_content_hash:
-                to_sync.append(chunk)
-                pending_stats.append("updated")
-            else:
-                payload_only_update = build_payload(chunk)
-                payload_only_update["content_hash"] = current_content_hash
-                payload_only_update["payload_hash"] = current_payload_hash
-                client.set_payload(
-                    collection_name=COLLECTION_NAME,
-                    points=[point_id],
-                    payload=payload_only_update,
-                )
-                stats["updated"] += 1
-                logger.info("Metadata-only update for point %s (vendure_product)", point_id)
-        else:
-            stats["skipped"] += 1
-
-    for i in range(0, len(to_sync), BATCH_SIZE):
-        batch = to_sync[i : i + BATCH_SIZE]
-        try:
-            points = _build_points_from_chunks(batch)
-            client.upsert(collection_name=COLLECTION_NAME, points=points)
-
-            for action in pending_stats[i : i + len(batch)]:
-                stats[action] += 1
-
-            logger.info("Batch %d: %d productos sincronizados", i // BATCH_SIZE + 1, len(batch))
-        except Exception:
-            logger.exception("Error en batch %d", i // BATCH_SIZE + 1)
-            stats["failed"] += len(batch)
-
+    # Cleanup solo en sync completo (product_id=None)
     if product_id is None:
-        stale_ids = scroll_product_point_ids(client) - active_point_ids
+        stale_ids = (
+            _scroll_point_ids_by_source_type(client, "vendure_product") - active_ids
+        )
         if stale_ids:
             client.delete(
                 collection_name=COLLECTION_NAME,
@@ -398,24 +309,27 @@ def sync_catalog(product_id: Optional[int] = None) -> dict:
 
 
 # =============================================================================
-# API PÚBLICA - PDFs y GUÍAS UI
+# API PÚBLICA — PDFs
 # =============================================================================
 
+
 def sync_documents(tenant_id: str = "platform", folder: str = "policies") -> dict:
-    """
-    Sincroniza PDFs desde ./data/{tenant_id}/{folder}/
+    """Sincroniza PDFs desde ./data/{tenant_id}/{folder}/ hacia Qdrant.
 
     Args:
-        tenant_id: Identificador del tenant (carpeta en data/)
-        folder: Subcarpeta (policies, docs)
-
-    Returns:
-        Estadísticas de la sincronización
+        tenant_id: Identificador del tenant (carpeta en data/).
+        folder: Subcarpeta (policies, docs, company, etc.).
     """
     started = datetime.now(timezone.utc)
-    stats = {"inserted": 0, "updated": 0, "skipped": 0, "failed": 0, "total_files": 0, "total_chunks": 0}
+    stats = {
+        "inserted": 0,
+        "updated": 0,
+        "skipped": 0,
+        "failed": 0,
+        "total_files": 0,
+        "total_chunks": 0,
+    }
 
-    # Extraer documentos
     documents = extract_pending_documents(tenant_id, folder)
     stats["total_files"] = len(documents)
 
@@ -423,7 +337,6 @@ def sync_documents(tenant_id: str = "platform", folder: str = "policies") -> dic
         logger.warning("No hay PDFs para sincronizar en %s/%s", tenant_id, folder)
         return {"status": "no_documents", "stats": stats, "collection": COLLECTION_NAME}
 
-    # Convertir a chunks
     all_chunks: List[ChunkInput] = []
     for doc in documents:
         chunks = read_pdf_chunks(doc)
@@ -433,14 +346,9 @@ def sync_documents(tenant_id: str = "platform", folder: str = "policies") -> dic
     if not all_chunks:
         return {"status": "no_chunks", "stats": stats, "collection": COLLECTION_NAME}
 
-    # Sincronizar
     client = get_qdrant_client()
     _ensure_collection(client)
-
-    active_ids = _sync_chunks(all_chunks, client, stats, "pdf")
-
-    # Cleanup de PDFs eliminados (opcional)
-    # stale_ids = _scroll_point_ids_by_source_type(client, "pdf") - active_ids
+    _sync_chunks(all_chunks, client, stats, "pdf")
 
     duration = (datetime.now(timezone.utc) - started).total_seconds()
     return {
@@ -455,21 +363,28 @@ def sync_documents(tenant_id: str = "platform", folder: str = "policies") -> dic
     }
 
 
+# =============================================================================
+# API PÚBLICA — GUÍAS UI
+# =============================================================================
+
+
 def sync_ui_guides(tenant_id: str = "platform", folder: str = "guides") -> dict:
-    """
-    Sincroniza guías markdown desde ./data/{tenant_id}/{folder}/
+    """Sincroniza guías markdown desde ./data/{tenant_id}/{folder}/ hacia Qdrant.
 
     Args:
-        tenant_id: Identificador del tenant (carpeta en data/)
-        folder: Subcarpeta (guides)
-
-    Returns:
-        Estadísticas de la sincronización
+        tenant_id: Identificador del tenant (carpeta en data/).
+        folder: Subcarpeta (guides).
     """
     started = datetime.now(timezone.utc)
-    stats = {"inserted": 0, "updated": 0, "skipped": 0, "failed": 0, "total_files": 0, "total_sections": 0}
+    stats = {
+        "inserted": 0,
+        "updated": 0,
+        "skipped": 0,
+        "failed": 0,
+        "total_files": 0,
+        "total_sections": 0,
+    }
 
-    # Extraer guías
     guides = extract_ui_guides(tenant_id, folder)
     stats["total_files"] = len(guides)
 
@@ -477,7 +392,6 @@ def sync_ui_guides(tenant_id: str = "platform", folder: str = "guides") -> dict:
         logger.warning("No hay guías para sincronizar en %s/%s", tenant_id, folder)
         return {"status": "no_guides", "stats": stats, "collection": COLLECTION_NAME}
 
-    # Convertir a chunks
     all_chunks: List[ChunkInput] = []
     for guide in guides:
         chunks = read_guide_chunks(guide)
@@ -487,11 +401,9 @@ def sync_ui_guides(tenant_id: str = "platform", folder: str = "guides") -> dict:
     if not all_chunks:
         return {"status": "no_chunks", "stats": stats, "collection": COLLECTION_NAME}
 
-    # Sincronizar
     client = get_qdrant_client()
     _ensure_collection(client)
-
-    active_ids = _sync_chunks(all_chunks, client, "ui_guide_md")
+    _sync_chunks(all_chunks, client, stats, "ui_guide_md")
 
     duration = (datetime.now(timezone.utc) - started).total_seconds()
     return {

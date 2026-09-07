@@ -28,7 +28,7 @@ VECTOR_SIZE: int = int(_get_env("VECTOR_SIZE", "1536"))
 
 # PostgreSQL (Vendure) - usuario de solo lectura
 PG_HOST: str = _get_env("PG_HOST", "")
-PG_PORT: int = int(_get_env("PG_PORT"))
+PG_PORT: int = int(_get_env("PG_PORT", "5432"))
 PG_DB: str = _get_env("PG_DB", "")
 PG_USER: str = _get_env("PG_USER", "")
 PG_PASSWORD: str = _get_env("PG_PASSWORD", "")

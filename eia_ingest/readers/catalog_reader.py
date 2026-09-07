@@ -1,7 +1,11 @@
-"""Lectura del catálogo desde PostgreSQL (solo SELECT)."""
+"""Lectura del catálogo desde PostgreSQL (solo SELECT).
+
+La SQL retorna una fila por canal Vendure (product_channels_channel).
+Antes de crear ChunkInputs, se agrupan por (product_id, language) para
+que el mismo producto en múltiples canales genere UN solo punto en Qdrant.
+"""
 from __future__ import annotations
 
-import json
 import logging
 import re
 import unicodedata
@@ -79,13 +83,6 @@ DEFAULT_CHANNEL_CODE = "__default_channel__"
 PLATFORM_TENANT_ID = "platform"
 
 
-def resolve_tenant_id(channel_code: str, channel_token: str) -> str:
-    """Resuelve el tenant_id usando el canal real de Vendure cuando corresponde."""
-    if channel_code == DEFAULT_CHANNEL_CODE:
-        return PLATFORM_TENANT_ID
-    return channel_token or PLATFORM_TENANT_ID
-
-
 def generate_product_slug(name: str) -> str:
     normalized = unicodedata.normalize("NFKD", name).encode("ASCII", "ignore").decode("utf-8")
     normalized = normalized.lower()
@@ -93,13 +90,22 @@ def generate_product_slug(name: str) -> str:
     return slug.strip("-")
 
 
-def _row_to_chunk_input(row, tenant_id: str = "platform") -> ChunkInput:
-    """Convierte una fila de producto a ChunkInput unificado."""
+def _row_to_chunk_input(
+    row,
+    tenant_id: str = "platform",
+    channels_info: Optional[List[dict]] = None,
+) -> ChunkInput:
+    """Convierte datos de producto (agrupados por canal) a ChunkInput unificado.
+
+    Args:
+        row: Tupla con los campos del producto (sin canal).
+        tenant_id: Identificador del tenant.
+        channels_info: Lista de dicts con info de cada canal:
+            [{"channel_id": 1, "channel_code": "sol-y-luna",
+              "channel_token": "sol-y-luna-token"}, ...]
+    """
     (
         product_id,
-        channel_id,
-        channel_code,
-        channel_token,
         language,
         name,
         description,
@@ -110,11 +116,9 @@ def _row_to_chunk_input(row, tenant_id: str = "platform") -> ChunkInput:
         options,
     ) = row
 
-    resolved_tenant_id = resolve_tenant_id(channel_code, channel_token)
-    if tenant_id != "platform":
-        resolved_tenant_id = tenant_id
+    if channels_info is None:
+        channels_info = []
 
-    # Usar el slug de la base de datos, o generar uno si no existe
     product_slug = slug if slug else generate_product_slug(name)
     product_url = f"{SHOP_BASE_URL}/{language}/product/{product_slug}"
 
@@ -131,7 +135,11 @@ def _row_to_chunk_input(row, tenant_id: str = "platform") -> ChunkInput:
 
     text_to_embed += f"Descripción: {description}"
 
-    # Metadata específica del producto
+    # Metadata — incluye info de todos los canales del producto
+    channel_codes = [c["channel_code"] for c in channels_info]
+    channel_tokens = [c["channel_token"] for c in channels_info]
+    channel_ids = [c["channel_id"] for c in channels_info]
+
     metadata = {
         "product_id": product_id,
         "name": name,
@@ -141,19 +149,22 @@ def _row_to_chunk_input(row, tenant_id: str = "platform") -> ChunkInput:
         "skus": [] if not skus else skus.split(", "),
         "options": [] if not options else options.split(", "),
         "language": language,
-        "channel_id": channel_id,
-        "channel_code": channel_code,
-        "channel_token": channel_token,
+        "channel_ids": channel_ids,
+        "channel_codes": channel_codes,
+        "channel_tokens": channel_tokens,
     }
 
+    # source_id channel-agnostic: mismo ID sin importar el canal
+    source_id = f"product:{product_id}:{language}"
+
     return ChunkInput(
-        tenant_id=resolved_tenant_id,
+        tenant_id=tenant_id,
         content_type="CATALOGO",
         audience=AUDIENCE_CLIENTE,
-        channels=["web","whatsapp","instagram","messenger"],
+        channels=["web", "whatsapp", "instagram", "messenger"],
         text=text_to_embed,
         source_type="vendure_product",
-        source_id=f"product:{product_id}:{channel_token}:{language}",
+        source_id=source_id,
         metadata=metadata,
     )
 
@@ -163,16 +174,19 @@ def extract_product_catalog(
     verbose: bool = False,
     tenant_id: str = "platform",
 ) -> List[ChunkInput]:
-    """
-    Extrae productos activos del catálogo y los retorna como ChunkInputs.
+    """Extrae productos activos del catálogo y los retorna como ChunkInputs.
+
+    La SQL retorna una fila por canal Vendure. Esta función agrupa por
+    (product_id, language) para que cada producto genere UN solo punto
+    en Qdrant, con la info de todos los canales en metadata.
 
     Args:
-        product_id: Filtrar por producto específico (opcional)
-        verbose: Loggear información adicional
-        tenant_id: Identificador del tenant (default: platform)
+        product_id: Filtrar por producto específico (opcional).
+        verbose: Loggear información adicional.
+        tenant_id: Identificador del tenant (default: platform).
 
     Returns:
-        Lista de ChunkInput listos para sincronizar
+        Lista de ChunkInput listos para sincronizar.
     """
     product_filter = ""
     params: tuple = ()
@@ -189,13 +203,44 @@ def extract_product_catalog(
                 cur.execute(query, params)
                 rows = cur.fetchall()
 
-        chunks = [_row_to_chunk_input(row, tenant_id) for row in rows]
+        # Agrupar por (product_id, language) para deduplicar canales
+        grouped: dict = {}
+        for row in rows:
+            (
+                pid, channel_id, channel_code, channel_token,
+                language, name, description, slug,
+                categories, attributes, skus, options,
+            ) = row
+
+            key = (pid, language)
+            if key not in grouped:
+                grouped[key] = {
+                    "product_row": (pid, language, name, description, slug,
+                                    categories, attributes, skus, options),
+                    "channels": [],
+                }
+            grouped[key]["channels"].append({
+                "channel_id": channel_id,
+                "channel_code": channel_code,
+                "channel_token": channel_token,
+            })
+
+        chunks = [
+            _row_to_chunk_input(
+                data["product_row"],
+                tenant_id=tenant_id,
+                channels_info=data["channels"],
+            )
+            for data in grouped.values()
+        ]
 
         if verbose and chunks:
-            logger.info("Extraídos %d productos/idiomas.", len(chunks))
+            logger.info("Extraídos %d productos/idiomas (de %d filas SQL).",
+                        len(chunks), len(rows))
             first = chunks[0]
-            logger.debug("Muestra: tenant=%s, content_type=%s, source=%s",
-                        first.tenant_id, first.content_type, first.source_id)
+            logger.debug("Muestra: tenant=%s, source=%s, canales=%s",
+                         first.tenant_id, first.source_id,
+                         first.metadata.get("channel_codes"))
 
         return chunks
 

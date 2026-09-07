@@ -12,8 +12,6 @@ from eia_ingest.config import (
     PG_PORT,
     PG_SSL,
     PG_USER,
-    QDRANT_API_KEY,
-    QDRANT_URL,
 )
 from eia_ingest.scheduler import sync_scheduler
 from eia_ingest.sync import sync_catalog, sync_documents, sync_ui_guides
@@ -194,5 +192,3 @@ def run_dev():
     """Ejecuta el servidor de desarrollo de uvicorn."""
     import uvicorn
     uvicorn.run("eia_ingest.api:app", host="127.0.0.1", port=8000, reload=True)
-
-hola=""
