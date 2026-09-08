@@ -82,12 +82,48 @@ def _readonly_connection() -> psycopg2.extensions.connection:
 DEFAULT_CHANNEL_CODE = "__default_channel__"
 PLATFORM_TENANT_ID = "platform"
 
+# Nombres/slugs de productos placeholder o de prueba que no deben indexarse.
+# Entran al catálogo como borradores y ensucian las respuestas del chatbot
+# (aparecen como "Producto" genérico sin marca real en las búsquedas).
+PLACEHOLDER_NAMES = {
+    "producto",
+    "product",
+    "test",
+    "sample",
+    "test product",
+    "producto de prueba",
+    "producto de test",
+    "café de prueba",
+}
+PLACEHOLDER_SLUG_SEGMENTS = ("producto", "product", "test", "sample")
+
 
 def generate_product_slug(name: str) -> str:
     normalized = unicodedata.normalize("NFKD", name).encode("ASCII", "ignore").decode("utf-8")
     normalized = normalized.lower()
     slug = re.sub(r"[^a-z0-9]+", "-", normalized)
     return slug.strip("-")
+
+
+def _normalize_name(value: str) -> str:
+    normalized = unicodedata.normalize("NFD", value)
+    return "".join(c.lower() for c in normalized if c.isalnum() or c.isspace()).strip()
+
+
+def _is_placeholder_product(name: str, slug: str) -> bool:
+    """True si el producto es un placeholder/test (p. ej. "Producto" genérico).
+
+    Se compara el nombre normalizado (sin acentos/mayúsculas) con la lista de
+    nombres placeholders y se examinan los segmentos del slug. Conservador: un
+    producto real ("Panela orgánica") jamás cae aquí.
+    """
+    norm_name = _normalize_name(name or "")
+    if norm_name in PLACEHOLDER_NAMES:
+        return True
+
+    slug_lower = (slug or "").strip().lower().strip("/")
+    segments = slug_lower.split("/")[-1].split("-") if slug_lower else []
+    return any(segment in PLACEHOLDER_SLUG_SEGMENTS for segment in segments)
 
 
 def _row_to_chunk_input(
@@ -205,12 +241,17 @@ def extract_product_catalog(
 
         # Agrupar por (product_id, language) para deduplicar canales
         grouped: dict = {}
+        skipped_placeholders = 0
         for row in rows:
             (
                 pid, channel_id, channel_code, channel_token,
                 language, name, description, slug,
                 categories, attributes, skus, options,
             ) = row
+
+            if _is_placeholder_product(name, slug):
+                skipped_placeholders += 1
+                continue
 
             key = (pid, language)
             if key not in grouped:
@@ -237,6 +278,9 @@ def extract_product_catalog(
         if verbose and chunks:
             logger.info("Extraídos %d productos/idiomas (de %d filas SQL).",
                         len(chunks), len(rows))
+            if skipped_placeholders:
+                logger.info("Saltados %d filas de productos placeholder/test.",
+                            skipped_placeholders)
             first = chunks[0]
             logger.debug("Muestra: tenant=%s, source=%s, canales=%s",
                          first.tenant_id, first.source_id,

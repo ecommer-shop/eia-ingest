@@ -17,6 +17,14 @@ dependencies = [
 eia-sync = "eia_ingest.__main__:main"
 dev = "eia_ingest.api:run_dev"
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

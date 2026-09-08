@@ -1,6 +1,6 @@
 from eia_ingest.readers.pdf_reader import get_content_type_for_folder
 from eia_ingest.readers.ui_guide_reader import read_guide_chunks
-from eia_ingest.readers.catalog_reader import _row_to_chunk_input
+from eia_ingest.readers.catalog_reader import _is_placeholder_product, _row_to_chunk_input
 
 
 def test_pdf_reader_maps_folder_to_content_type():
@@ -62,3 +62,21 @@ def test_catalog_single_channel():
     assert chunk.source_id == "product:99:es"
     assert chunk.metadata["channel_codes"] == ["__default_channel__"]
     assert len(chunk.metadata["channel_tokens"]) == 1
+
+
+def test_placeholder_product_detected_by_name():
+    assert _is_placeholder_product("Producto", "producto") is True
+    assert _is_placeholder_product("producto de prueba", "producto-de-prueba") is True
+    assert _is_placeholder_product("Product", "product") is True
+
+
+def test_placeholder_product_detected_by_slug():
+    assert _is_placeholder_product("Panela", "test") is True
+    assert _is_placeholder_product("Café", "product-123") is True
+
+
+def test_real_product_not_marked_as_placeholder():
+    assert _is_placeholder_product("Panela orgánica", "panela-organica") is False
+    assert _is_placeholder_product("Café orgánico Alem", "cafe-organico-alem") is False
+    assert _is_placeholder_product("Amigurumi oso", "amigurumi-oso") is False
+    assert _is_placeholder_product("", "kz-castor-pro") is False
