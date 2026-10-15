@@ -28,6 +28,9 @@ from eia_ingest.point_builder import ChunkInput
 
 logger = logging.getLogger(__name__)
 
+# Productos excluidos manualmente del catálogo (no deben subir a Qdrant).
+EXCLUDED_PRODUCT_IDS = (308,)  # KZ PISCES: excluido a petición del equipo
+
 CATALOG_QUERY = """
     SELECT
         p.id AS product_id,
@@ -43,7 +46,7 @@ CATALOG_QUERY = """
         COALESCE(string_agg(DISTINCT pv.sku, ', '), '') AS skus,
         COALESCE(string_agg(DISTINCT pot.name, ', '), '') AS options
     FROM product p
-    JOIN product_translation pt ON p.id = pt."baseId" AND pt."languageCode" IN ('es', 'en')
+    JOIN product_translation pt ON p.id = pt."baseId" AND pt."languageCode" = 'es'
     JOIN product_channels_channel pcc ON pcc."productId" = p.id
     JOIN channel c ON c.id = pcc."channelId"
     LEFT JOIN product_facet_values_facet_value pfv ON p.id = pfv."productId"
@@ -55,6 +58,15 @@ CATALOG_QUERY = """
     LEFT JOIN product_option_translation pot ON pv_opt."productOptionId" = pot."baseId" AND pot."languageCode" = pt."languageCode"
     WHERE p."deletedAt" IS NULL
         AND p.enabled = true
+        AND EXISTS (SELECT 1 FROM product_asset pa WHERE pa."productId" = p.id)
+        AND EXISTS (SELECT 1 FROM product_variant pv2 WHERE pv2."productId" = p.id AND pv2.enabled = true)
+        AND EXISTS (
+            SELECT 1 FROM product_channels_channel pcc2
+            JOIN channel c2 ON c2.id = pcc2."channelId"
+            WHERE pcc2."productId" = p.id AND c2.code <> '__default_channel__'
+        )
+        AND p.id NOT IN %(excluded)s
+        AND pt.name !~ '^Producto [0-9]+ de '
     {product_filter}
     GROUP BY p.id, c.id, c.code, c.token, pt."languageCode", pt.name, pt.description, pt.slug
 """
@@ -189,10 +201,10 @@ def extract_product_catalog(
         Lista de ChunkInput listos para sincronizar.
     """
     product_filter = ""
-    params: tuple = ()
+    params: dict = {"excluded": tuple(EXCLUDED_PRODUCT_IDS)}
     if product_id is not None:
-        product_filter = "AND p.id = %s"
-        params = (product_id,)
+        product_filter = "AND p.id = %(product_id)s"
+        params["product_id"] = product_id
 
     query = CATALOG_QUERY.format(product_filter=product_filter)
     _assert_readonly_query(query)
