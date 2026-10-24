@@ -119,6 +119,29 @@ SHOP_BASE_URL=https://stg.ecommer.shop
 BATCH_SIZE=64
 ```
 
+## Variables de entorno por rama
+
+Cada rama usa su propio archivo de llaves; el hook `post-checkout` copia el archivo de la rama a `.env` automáticamente:
+
+| Rama | Archivo | Contenido |
+|------|---------|-----------|
+| `main` | `.env.main` | Stage/producción |
+| `dev` | `.env.dev` | Desarrollo |
+| `Kevin` | `.env.dev` | Desarrollo (mismo archivo que `dev`) |
+| cualquier otra | `.env.dev` | Desarrollo (default) |
+
+**Activación (una vez por clon):**
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Notas:
+
+- Los archivos `.env*` son locales (gitignored); cada desarrollador crea los suyos. Si falta el archivo de la rama, el hook no toca `.env`.
+- `eia_ingest/config.py` también resuelve el archivo por rama en runtime, así que funciona aunque los hooks no estén activos.
+- Al hacer deploy (Railway u otro), configurar las variables del entorno directamente en la plataforma.
+
 ## Cómo funciona
 
 1. **Fuentes múltiples** → Catálogo (PostgreSQL), PDFs (./data), Guías (./data)
