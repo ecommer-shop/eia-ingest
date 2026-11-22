@@ -254,6 +254,62 @@ def _sync_chunks(
 # =============================================================================
 
 
+def delete_product(product_id: int) -> dict:
+    """Elimina de Qdrant todos los puntos de un producto (cualquier tenant/idioma).
+
+    Filtra por source_type=vendure_product AND metadata.product_id=product_id,
+    por lo que no es necesario conocer tenant_id ni language.
+    """
+    started = datetime.now(timezone.utc)
+    product_filter = Filter(
+        must=[
+            FieldCondition(
+                key="source_type", match=MatchValue(value="vendure_product")
+            ),
+            FieldCondition(
+                key="metadata.product_id", match=MatchValue(value=product_id)
+            ),
+        ]
+    )
+    client = get_qdrant_client()
+
+    stale_ids: List[str] = []
+    offset = None
+    while True:
+        points, offset = client.scroll(
+            collection_name=COLLECTION_NAME,
+            scroll_filter=product_filter,
+            limit=100,
+            offset=offset,
+            with_payload=False,
+            with_vectors=False,
+        )
+        stale_ids.extend(str(point.id) for point in points)
+        if offset is None:
+            break
+
+    if stale_ids:
+        client.delete(
+            collection_name=COLLECTION_NAME,
+            points_selector=PointIdsList(points=stale_ids),
+        )
+        logger.info(
+            "Eliminados %d puntos del producto %s", len(stale_ids), product_id
+        )
+    else:
+        logger.info("Producto %s no encontrado en Qdrant (nada que borrar)", product_id)
+
+    duration = (datetime.now(timezone.utc) - started).total_seconds()
+    return {
+        "status": "completed",
+        "collection": COLLECTION_NAME,
+        "product_id": product_id,
+        "deleted": len(stale_ids),
+        "duration_seconds": duration,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def sync_catalog(product_id: Optional[int] = None) -> dict:
     """Sincroniza el catálogo de productos desde PostgreSQL hacia Qdrant.
 

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Se dispara tras rebase y commit --amend
+
+sh "$(git rev-parse --show-toplevel)/.githooks/sync-env.sh"
