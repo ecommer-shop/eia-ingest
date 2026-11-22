@@ -6,11 +6,12 @@ requires-python = ">=3.12"
 dependencies = [
     "psycopg2-binary==2.9.11",
     "python-dotenv==1.2.1",
-    "qdrant_client==1.17.0",
+    "qdrant_client==1.19.1",
     "openai>=1.0.0",
     "fastapi>=0.110.0",
     "uvicorn>=0.28.0",
     "pypdf>=4.0.0",
+    "pyjwt>=2.8.0",
 ]
 
 [project.scripts]

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Se dispara tras git pull/merge
+
+sh "$(git rev-parse --show-toplevel)/.githooks/sync-env.sh"

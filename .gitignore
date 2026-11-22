@@ -20,8 +20,8 @@ env/
 
 # Project-specific paths
 .env
-.env.main
-.env.dev
+.env.*
+!.env.example
 logs/
 data/
 data_GENERAL/
